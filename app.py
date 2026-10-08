@@ -403,6 +403,71 @@ _PAGE = r"""<!doctype html>
       </div>
     </main>
 
+    <style>
+      /* styles for rendered markdown inside assistant bubbles */
+      .bubble.asst h1, .bubble.asst h2, .bubble.asst h3 {
+        margin: 0.6em 0 0.3em;
+        line-height: 1.25;
+        font-weight: 600;
+      }
+      .bubble.asst h1 { font-size: 1.2rem; }
+      .bubble.asst h2 { font-size: 1.1rem; }
+      .bubble.asst h3 { font-size: 1.0rem; }
+      .bubble.asst p  { margin: 0.4em 0; }
+      .bubble.asst ul, .bubble.asst ol { margin: 0.4em 0; padding-left: 1.25rem; }
+      .bubble.asst li { margin: 0.15em 0; }
+      .bubble.asst code {
+        font-family: var(--mono);
+        font-size: 0.9em;
+        background: var(--surface-2);
+        padding: 0.08em 0.35em;
+        border-radius: 3px;
+      }
+      .bubble.asst pre {
+        margin: 0.5em 0;
+        padding: 0.6em 0.75em;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow-x: auto;
+        font-family: var(--mono);
+        font-size: 0.85rem;
+        line-height: 1.4;
+      }
+      .bubble.asst pre code { background: transparent; padding: 0; }
+      .bubble.asst a {
+        color: var(--accent);
+        text-decoration: underline;
+      }
+      .bubble.asst strong { font-weight: 600; }
+      .bubble.asst em { font-style: italic; }
+      .bubble.asst blockquote {
+        margin: 0.4em 0;
+        padding-left: 0.75em;
+        border-left: 3px solid var(--border);
+        color: var(--ink-2);
+      }
+      .bubble.asst table {
+        border-collapse: collapse;
+        margin: 0.5em 0;
+        font-size: 0.9em;
+        display: block;
+        overflow-x: auto;
+        max-width: 100%;
+      }
+      .bubble.asst th, .bubble.asst td {
+        border: 1px solid var(--border);
+        padding: 0.3em 0.6em;
+        text-align: left;
+      }
+      .bubble.asst th { background: var(--surface-2); font-weight: 600; }
+      .bubble.asst hr {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 0.6em 0;
+      }
+    </style>
+
     <footer>
       <div class="composer">
         <textarea id="prompt" placeholder="Message the model…" autofocus></textarea>
@@ -427,6 +492,115 @@ _PAGE = r"""<!doctype html>
 
       let sending = false;
       let messages = []; // {role: "user"|"asst"|"err", text, meta?}
+
+      // --- minimal markdown renderer -----------------------------------
+      //
+      // Zero-dep. Handles the 90% of markdown LLMs emit: fenced code,
+      // headings, lists, tables, bold/italic/inline-code, blockquotes,
+      // links, hr. HTML-escapes first, then re-emits whitelisted markdown
+      // constructs — anything the LLM writes that isn't one of these
+      // patterns renders as plain text. No raw HTML can slip through,
+      // so no XSS surface from model output.
+      function escapeHtml(s) {
+        return s.replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;",
+          '"': "&quot;", "'": "&#39;"
+        }[c]));
+      }
+      function renderMarkdown(src) {
+        if (!src) return "";
+        // 1) extract fenced code blocks first so their interior isn't
+        //    touched by other markdown rules.
+        const fences = [];
+        src = src.replace(/```([\w+-]*)\n?([\s\S]*?)```/g, (_m, lang, body) => {
+          const i = fences.length;
+          fences.push({ lang: (lang || "").trim(), body });
+          return ` FENCE${i} `;
+        });
+
+        // 2) escape everything
+        src = escapeHtml(src);
+
+        // 3) tables (GFM pipe tables). Done before paragraph splitting.
+        src = src.replace(/(^\|.*\|[ \t]*\n\|[-:| \t]+\|[ \t]*\n(?:\|.*\|[ \t]*\n?)+)/gm,
+          (block) => {
+            const lines = block.trim().split("\n");
+            const head = lines[0].split("|").slice(1, -1).map(c => c.trim());
+            const rows = lines.slice(2).map(r => r.split("|").slice(1, -1).map(c => c.trim()));
+            const th = head.map(c => `<th>${inline(c)}</th>`).join("");
+            const trs = rows.map(r => `<tr>${r.map(c => `<td>${inline(c)}</td>`).join("")}</tr>`).join("");
+            return `<table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>\n`;
+          });
+
+        // 4) split into blocks on blank lines
+        const blocks = src.split(/\n\s*\n/);
+        const out = blocks.map(block => {
+          const b = block.replace(/\s+$/, "");
+          if (!b) return "";
+          // headings
+          const h = b.match(/^(#{1,6})\s+(.*)$/);
+          if (h) {
+            const lvl = Math.min(6, h[1].length);
+            return `<h${lvl}>${inline(h[2])}</h${lvl}>`;
+          }
+          // horizontal rule
+          if (/^---+$/.test(b.trim())) return "<hr>";
+          // blockquote
+          if (/^> /.test(b)) {
+            const inner = b.replace(/^> ?/gm, "");
+            return `<blockquote>${inline(inner).replace(/\n/g, "<br>")}</blockquote>`;
+          }
+          // ordered list
+          if (/^(\s*\d+\.)\s+/.test(b)) {
+            const items = b.split(/\n(?=\s*\d+\.\s)/).map(li =>
+              `<li>${inline(li.replace(/^\s*\d+\.\s+/, ""))}</li>`).join("");
+            return `<ol>${items}</ol>`;
+          }
+          // unordered list
+          if (/^(\s*[-*+])\s+/.test(b)) {
+            const items = b.split(/\n(?=\s*[-*+]\s)/).map(li =>
+              `<li>${inline(li.replace(/^\s*[-*+]\s+/, ""))}</li>`).join("");
+            return `<ul>${items}</ul>`;
+          }
+          // if block already starts with a tag we generated (table), passthrough
+          if (/^<(table|hr|h\d|ul|ol|blockquote)/.test(b)) return b;
+          // paragraph
+          return `<p>${inline(b).replace(/\n/g, "<br>")}</p>`;
+        }).join("\n");
+
+        // 5) re-insert fenced code blocks
+        const result = out.replace(/ FENCE(\d+) /g, (_m, i) => {
+          const f = fences[+i];
+          const langClass = f.lang ? ` class="language-${escapeHtml(f.lang)}"` : "";
+          return `<pre><code${langClass}>${escapeHtml(f.body.replace(/\n$/, ""))}</code></pre>`;
+        });
+
+        return result;
+
+        function inline(s) {
+          // inline code first — won't be touched by bold/italic
+          const codes = [];
+          s = s.replace(/`([^`\n]+)`/g, (_m, c) => {
+            const i = codes.length;
+            codes.push(c);
+            return `C${i}`;
+          });
+          // links [text](url) — restrict href scheme
+          s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, text, href) => {
+            const safe = /^(https?:|mailto:|\/)/.test(href) ? href : "#";
+            return `<a href="${safe}" target="_blank" rel="noopener">${text}</a>`;
+          });
+          // bold **x** / __x__
+          s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+          s = s.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+          // italic *x* / _x_ (avoid crossing word boundaries like foo_bar_baz)
+          s = s.replace(/(^|[^*\w])\*([^*\n]+)\*(?![*\w])/g, "$1<em>$2</em>");
+          s = s.replace(/(^|[^_\w])_([^_\n]+)_(?![_\w])/g, "$1<em>$2</em>");
+          // restore inline code
+          s = s.replace(/C(\d+)/g, (_m, i) => `<code>${codes[+i]}</code>`);
+          return s;
+        }
+      }
 
       // --- meta chip wiring --------------------------------------------
       fetch("/meta")
@@ -454,6 +628,11 @@ _PAGE = r"""<!doctype html>
           bubble.className = "bubble " + m.role;
           if (m.isLoading) {
             bubble.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
+          } else if (m.role === "asst") {
+            // assistant replies are markdown-rendered (sanitized via
+            // HTML-escape-first + whitelist). user + error bubbles stay
+            // as plain textContent — never render user input as HTML.
+            bubble.innerHTML = renderMarkdown(m.text || "");
           } else {
             bubble.textContent = m.text || "";
           }
