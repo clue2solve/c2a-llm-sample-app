@@ -515,7 +515,7 @@ _PAGE = r"""<!doctype html>
         src = src.replace(/```([\w+-]*)\n?([\s\S]*?)```/g, (_m, lang, body) => {
           const i = fences.length;
           fences.push({ lang: (lang || "").trim(), body });
-          return ` FENCE${i} `;
+          return `FENCE${i}`;
         });
 
         // 2) escape everything
@@ -569,7 +569,7 @@ _PAGE = r"""<!doctype html>
         }).join("\n");
 
         // 5) re-insert fenced code blocks
-        const result = out.replace(/ FENCE(\d+) /g, (_m, i) => {
+        const result = out.replace(/FENCE(\d+)/g, (_m, i) => {
           const f = fences[+i];
           const langClass = f.lang ? ` class="language-${escapeHtml(f.lang)}"` : "";
           return `<pre><code${langClass}>${escapeHtml(f.body.replace(/\n$/, ""))}</code></pre>`;
